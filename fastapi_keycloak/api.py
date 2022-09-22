@@ -213,6 +213,23 @@ class FastAPIKeycloak:
             "clientSecret": self.client_secret,
         }
 
+    def _get_user_from_token(self, token: str, required_roles: list, extra_fields: list) -> OIDCUser:
+        decoded_token = self._decode_token(token=token, audience="account")
+        user = OIDCUser.parse_obj(decoded_token)
+        if required_roles:
+            for role in required_roles:
+                if role not in user.roles:
+                    raise HTTPException(
+                        status_code=status.HTTP_403_FORBIDDEN,
+                        detail=f'Role "{role}" is required to perform this action',
+                    )
+
+        if extra_fields:
+            for field in extra_fields:
+                user.extra_fields[field] = decoded_token.get(field, None)
+
+        return user
+
     @functools.cached_property
     def user_auth_scheme(self) -> OAuth2PasswordBearer:
         """Returns the auth scheme to register the endpoints with swagger
@@ -222,7 +239,8 @@ class FastAPIKeycloak:
         """
         return OAuth2PasswordBearer(tokenUrl=self.token_uri)
 
-    def get_current_user(self, required_roles: List[str] = None, extra_fields: List[str] = None) -> Callable[OAuth2PasswordBearer, OIDCUser]:
+    def get_current_user(self, required_roles: List[str] = None, extra_fields: List[str] = None) -> Callable[
+        [OAuth2PasswordBearer], OIDCUser]:
         """Returns the current user based on an access token in the HTTP-header. Optionally verifies roles are possessed
         by the user
 
@@ -257,21 +275,56 @@ class FastAPIKeycloak:
                 JWTClaimsError: If any claim is invalid
                 HTTPException: If any role required is not contained within the roles of the users
             """
-            decoded_token = self._decode_token(token=token, audience="account")
-            user = OIDCUser.parse_obj(decoded_token)
-            if required_roles:
-                for role in required_roles:
-                    if role not in user.roles:
-                        raise HTTPException(
-                            status_code=status.HTTP_403_FORBIDDEN,
-                            detail=f'Role "{role}" is required to perform this action',
-                        )
+            return self._get_user_from_token(token, required_roles, extra_fields)
 
-            if extra_fields:
-                for field in extra_fields:
-                    user.extra_fields[field] = decoded_token.get(field, None)
+        return current_user
 
-            return user
+    @functools.cached_property
+    def user_auth_scheme_if_exist(self) -> OAuth2PasswordBearer:
+        """Returns the auth scheme to register the endpoints with swagger
+
+        Returns:
+            OAuth2PasswordBearer: Auth scheme for swagger
+        """
+        return OAuth2PasswordBearer(tokenUrl=self.token_uri, auto_error=False)
+
+    def get_current_user_if_exist(self, required_roles: List[str] = None, extra_fields: List[str] = None) -> Callable[
+        [OAuth2PasswordBearer], OIDCUser]:
+        """Returns the current user based on an access token in the HTTP-header. Optionally verifies roles are possessed
+        by the user
+
+        Args:
+            required_roles List[str]: List of role names required for this endpoint
+            extra_fields List[str]: The names of the additional fields you need that are encoded in JWT
+
+        Returns:
+            Callable[OAuth2PasswordBearer, OIDCUser]: Dependency method which returns the decoded JWT content
+
+        Raises:
+            ExpiredSignatureError: If the token is expired (exp > datetime.now())
+            JWTError: If decoding fails or the signature is invalid
+            JWTClaimsError: If any claim is invalid
+            HTTPException: If any role required is not contained within the roles of the users
+        """
+
+        def current_user(
+                token: OAuth2PasswordBearer = Depends(self.user_auth_scheme_if_exist),
+        ) -> OIDCUser | None:
+            """Decodes and verifies a JWT to get the current user
+
+            Args:
+                token OAuth2PasswordBearer: Access token in `Authorization` HTTP-header
+
+            Returns:
+                OIDCUser: Decoded JWT content
+
+            Raises:
+                ExpiredSignatureError: If the token is expired (exp > datetime.now())
+                JWTError: If decoding fails or the signature is invalid
+                JWTClaimsError: If any claim is invalid
+                HTTPException: If any role required is not contained within the roles of the users
+            """
+            return self._get_user_from_token(token, required_roles, extra_fields)
 
         return current_user
 
